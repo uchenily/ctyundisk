@@ -17,7 +17,7 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"os"
-	// "path/filepath"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -54,7 +54,16 @@ func configPath() (string, error) {
 	// 	return "", fmt.Errorf("获取可执行文件路径失败: %w", err)
 	// }
 	// return filepath.Join(filepath.Dir(exe), "config.json"), nil
-	return "./config.json", nil
+
+	// return "./config.json", nil
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Println("获取家目录失败:", err)
+		return "", err
+	}
+	configPath := filepath.Join(home, ".yd.conf")
+	return configPath, nil
 }
 
 func loadConfig() (*Config, error) {
