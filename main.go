@@ -252,6 +252,7 @@ func cmdLogin(args []string) {
 	client := &http.Client{Jar: jar, Timeout: 30 * time.Second}
 
 	params := url.Values{
+		// Use appid from cloud189
 		"appId":      {"9317140619"},
 		"clientType": {"10020"},
 		"timeStamp":  {strconv.FormatInt(time.Now().UnixMilli(), 10)},
@@ -449,13 +450,14 @@ func main() {
 		fmt.Println(`yd - 天翼云盘命令行工具
 
 用法:
-  yd login [用户名] [密码]         登录并生成配置文件
-  yd upload <文件路径> [-p 目录ID]  上传文件到云盘
-  yd download <文件名>              下载文件到当前目录
-  yd url <文件名>                  输出下载链接 (配合curl/wget使用)
-  yd ls [文件夹ID]                 列出云盘文件
+  yd login                         登录并生成配置文件
+  yd upload <文件路径> [-p 路径]     上传文件到云盘路径
+  yd download <文件路径>             下载文件到当前目录
+  yd url <文件路径>                  输出下载链接 (配合curl/wget使用)
+  yd ls [路径]                      列出云盘目录内容
 
-配置文件 config.json 自动生成在与可执行文件同一目录`)
+路径格式为 Unix 风格，如 /同步盘/yd , /我的文档
+根目录用 / 表示`)
 		os.Exit(1)
 	}
 
@@ -487,23 +489,80 @@ func main() {
 	}
 }
 
+// ────────── Path Resolution ──────────
+
+func pathToID(path string) (id string, isDir bool, size int64, err error) {
+	if path == "" || path == "/" {
+		return RootFolder, true, 0, nil
+	}
+	cleanPath := strings.TrimPrefix(path, "/")
+	parts := strings.Split(cleanPath, "/")
+	currentID := RootFolder
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		isLast := (i == len(parts)-1)
+		files, folders, fErr := listFilesPage(currentID, 1)
+		if fErr != nil {
+			return "", false, 0, fmt.Errorf("读取目录失败: %w", fErr)
+		}
+		if isLast {
+			for _, f := range folders {
+				if f.Name == part {
+					return f.ID.String(), true, 0, nil
+				}
+			}
+			for _, f := range files {
+				if f.Name == part {
+					return f.ID.String(), false, f.Size, nil
+				}
+			}
+			return "", false, 0, fmt.Errorf("文件/目录未找到: %s", path)
+		} else {
+			found := false
+			for _, f := range folders {
+				if f.Name == part {
+					currentID = f.ID.String()
+					found = true
+					break
+				}
+			}
+			if !found {
+				return "", false, 0, fmt.Errorf("目录未找到: /%s", strings.Join(parts[:i+1], "/"))
+			}
+		}
+	}
+	return currentID, true, 0, nil
+}
+
 // ────────── Upload ──────────
 
 func cmdUpload(args []string) {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "用法: yd upload <本地文件路径> [-p 文件夹ID]")
+		fmt.Fprintln(os.Stderr, "用法: yd upload <本地文件路径> [-p 路径]")
 		os.Exit(1)
 	}
 
 	localPath := args[0]
-	parentID := RootFolder
+	parentPath := "/"
 
 	remaining := args[1:]
 	for i := 0; i < len(remaining); i++ {
 		if remaining[i] == "-p" && i+1 < len(remaining) {
-			parentID = remaining[i+1]
+			parentPath = remaining[i+1]
 			i++
 		}
+	}
+
+	parentID, isDir, _, err := pathToID(parentPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "目标目录无效:", err)
+		os.Exit(1)
+	}
+	if !isDir {
+		fmt.Fprintln(os.Stderr, "目标路径不是目录:", parentPath)
+		os.Exit(1)
 	}
 
 	if err := doUpload(localPath, parentID); err != nil {
@@ -720,21 +779,24 @@ func getDownloadURLByID(fileID string) (string, error) {
 	return info.FileDownloadURL, nil
 }
 
-func getDownloadURL(name string) (string, error) {
-	fileID, _, err := findFileID(RootFolder, name)
+func getDownloadURL(path string) (string, error) {
+	fileID, isDir, _, err := pathToID(path)
 	if err != nil {
 		return "", err
+	}
+	if isDir {
+		return "", fmt.Errorf("路径指向的是目录而非文件: %s", path)
 	}
 	return getDownloadURLByID(fileID)
 }
 
 func cmdURL(args []string) {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "用法: yd url <文件名>")
+		fmt.Fprintln(os.Stderr, "用法: yd url <文件路径>")
 		os.Exit(1)
 	}
-	name := args[0]
-	dlURL, err := getDownloadURL(name)
+	path := args[0]
+	dlURL, err := getDownloadURL(path)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -746,43 +808,38 @@ func cmdURL(args []string) {
 
 func cmdDownload(args []string) {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "用法: yd download <文件名>")
+		fmt.Fprintln(os.Stderr, "用法: yd download <文件路径>")
 		os.Exit(1)
 	}
-	name := args[0]
-	if err := doDownload(name); err != nil {
+	path := args[0]
+	if err := doDownload(path); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func doDownload(name string) error {
-	fileID, fileSize, err := findFileID(RootFolder, name)
+func doDownload(path string) error {
+	fileID, isDir, fileSize, err := pathToID(path)
 	if err != nil {
 		return err
 	}
+	if isDir {
+		return fmt.Errorf("路径指向的是目录而非文件: %s", path)
+	}
 
-	fmt.Printf("下载 %s (%d 字节, ID=%s)...\n", name, fileSize, fileID)
+	name := path
+	if idx := strings.LastIndex(path, "/"); idx >= 0 {
+		name = path[idx+1:]
+	}
 
-	downloadURL, err := getDownloadURL(name)
+	fmt.Printf("下载 %s (%d 字节)...\n", path, fileSize)
+
+	downloadURL, err := getDownloadURLByID(fileID)
 	if err != nil {
 		return err
 	}
 
 	return downloadFile(downloadURL, name, fileSize)
-}
-
-func findFileID(parentID, name string) (string, int64, error) {
-	files, _, err := listFilesPage(parentID, 1)
-	if err != nil {
-		return "", 0, err
-	}
-	for _, f := range files {
-		if f.Name == name {
-			return f.ID.String(), f.Size, nil
-		}
-	}
-	return "", 0, fmt.Errorf("文件未找到: %s", name)
 }
 
 func downloadFile(downloadURL, localName string, totalSize int64) error {
@@ -852,9 +909,18 @@ type listResp struct {
 }
 
 func cmdList(args []string) {
-	folderID := RootFolder
+	path := "/"
 	if len(args) >= 1 {
-		folderID = args[0]
+		path = args[0]
+	}
+	folderID, isDir, _, err := pathToID(path)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if !isDir {
+		fmt.Fprintln(os.Stderr, "路径指向的是文件而非目录:", path)
+		os.Exit(1)
 	}
 	if err := doList(folderID); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -869,10 +935,10 @@ func doList(folderID string) error {
 	}
 
 	for _, f := range folders {
-		fmt.Printf("%-30s %-6s %s\n", f.Name, "[DIR]", f.ID.String())
+		fmt.Printf("%-30s %-6s\n", f.Name, "[DIR]")
 	}
 	for _, f := range files {
-		fmt.Printf("%-30s %-8s %s\n", f.Name, formatSize(f.Size), f.ID.String())
+		fmt.Printf("%-30s %-8s\n", f.Name, formatSize(f.Size))
 	}
 	return nil
 }
