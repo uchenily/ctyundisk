@@ -14,6 +14,7 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -47,17 +48,23 @@ type Config struct {
 
 var session *Session
 
-func loadConfig() (*Config, error) {
+func configPath() (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
-		return nil, fmt.Errorf("获取可执行文件路径失败: %w", err)
+		return "", fmt.Errorf("获取可执行文件路径失败: %w", err)
 	}
-	dir := filepath.Dir(exe)
-	path := filepath.Join(dir, "config.json")
+	return filepath.Join(filepath.Dir(exe), "config.json"), nil
+}
+
+func loadConfig() (*Config, error) {
+	path, err := configPath()
+	if err != nil {
+		return nil, err
+	}
 
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("打开配置文件失败 %s: %w", path, err)
+		return nil, fmt.Errorf("打开配置文件失败 %s: %w\n请先执行 yd login <用户名> <密码>", path, err)
 	}
 	defer f.Close()
 
@@ -69,6 +76,19 @@ func loadConfig() (*Config, error) {
 		return nil, fmt.Errorf("配置文件中缺少有效的 session.sessionKey / session.sessionSecret")
 	}
 	return &cfg, nil
+}
+
+func saveConfig(cfg *Config) error {
+	path, err := configPath()
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return json.NewEncoder(f).Encode(cfg)
 }
 
 func hmacSha1(data, key string) string {
@@ -216,18 +236,232 @@ func doUploadAPI(req *http.Request, result any) error {
 	return nil
 }
 
+// ────────── Login ──────────
+
+type qrRequest struct {
+	Uuid       string `json:"uuid"`
+	Encryuuid  string `json:"encryuuid"`
+	Encodeuuid string `json:"encodeuuid"`
+}
+
+func cmdLogin(args []string) {
+	fmt.Println("获取登录二维码...")
+
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar, Timeout: 30 * time.Second}
+
+	params := url.Values{
+		"appId":      {"9317140619"},
+		"clientType": {"10020"},
+		"timeStamp":  {strconv.FormatInt(time.Now().UnixMilli(), 10)},
+		"returnURL":  {"https://m.cloud.189.cn/zhuanti/2020/loginErrorPc/index.html"},
+	}
+	req, _ := http.NewRequest("GET", "https://cloud.189.cn/unifyLoginForPC.action?"+params.Encode(), nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "获取登录页面失败:", err)
+		os.Exit(1)
+	}
+	resp.Body.Close()
+
+	loc := resp.Request.Response
+	if loc == nil || loc.Header.Get("location") == "" {
+		fmt.Fprintln(os.Stderr, "未获取到登录重定向地址")
+		os.Exit(1)
+	}
+	referer := loc.Header.Get("location")
+	refURL, _ := url.Parse(referer)
+	q := refURL.Query()
+	appKey := q.Get("appId")
+	lt := q.Get("lt")
+	reqId := q.Get("reqId")
+
+	ac, err := qrGetAppConf(client, referer, appKey, lt, reqId)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "获取应用配置失败:", err)
+		os.Exit(1)
+	}
+
+	uuidReq, _ := http.NewRequest("GET", "https://open.e.189.cn/api/logbox/oauth2/getUUID.do?appId="+appKey, nil)
+	uuidResp, err := client.Do(uuidReq)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "获取UUID失败:", err)
+		os.Exit(1)
+	}
+	defer uuidResp.Body.Close()
+
+	var qrReq qrRequest
+	if err := json.NewDecoder(uuidResp.Body).Decode(&qrReq); err != nil {
+		fmt.Fprintln(os.Stderr, "解析UUID失败:", err)
+		os.Exit(1)
+	}
+
+	qrURL := fmt.Sprintf("https://open.e.189.cn/api/logbox/oauth2/image.do?REQID=%s&uuid=%s",
+		reqId, qrReq.Encodeuuid)
+	fmt.Println("\n请用浏览器打开以下链接，用手机天翼云盘扫码登录:")
+	fmt.Println(qrURL)
+	fmt.Println()
+
+	fmt.Print("等待扫码...")
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		state, err := qrCheckState(client, &qrReq, ac, referer, appKey, lt, reqId)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "\n查询状态失败:", err)
+			os.Exit(1)
+		}
+		switch state.Status {
+		case 0:
+			session, err := getSessionDirect(client, state.RedirectUrl)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "获取会话失败:", err)
+				os.Exit(1)
+			}
+			if err := saveConfig(&Config{Session: session}); err != nil {
+				fmt.Fprintln(os.Stderr, "保存配置失败:", err)
+				os.Exit(1)
+			}
+			fmt.Println("\n登录成功，配置已保存")
+			return
+		case -106:
+			fmt.Print(".")
+		case -11002:
+			fmt.Println("\n已扫码，请在手机上确认...")
+		default:
+			fmt.Fprintf(os.Stderr, "\n未知状态: %d\n", state.Status)
+			os.Exit(1)
+		}
+	}
+}
+
+type qrState struct {
+	Status      int32  `json:"status"`
+	RedirectUrl string `json:"redirectUrl"`
+}
+
+func qrCheckState(client *http.Client, qrReq *qrRequest, ac *appConfig, referer, appKey, lt, reqId string) (*qrState, error) {
+	params := url.Values{
+		"appId":      {appKey},
+		"encryuuid":  {qrReq.Encryuuid},
+		"uuid":       {qrReq.Uuid},
+		"returnUrl":  {ac.ReturnURL},
+		"clientType": {strconv.Itoa(ac.ClientType)},
+		"timeStamp":  {strconv.FormatInt(time.Now().UnixMilli(), 10)},
+		"cb_SaveName": {"0"},
+		"isOauth2":   {strconv.FormatBool(ac.IsOauth2)},
+		"state":      {""},
+		"paramId":    {ac.ParamID},
+		"date":       {time.Now().Format("2006-01-0215:04:059")},
+	}
+	u := "https://open.e.189.cn/api/logbox/oauth2/qrcodeLoginState.do?" + params.Encode()
+	req, _ := http.NewRequest("POST", u, nil)
+	req.Header.Set("Referer", referer)
+	req.Header.Set("lt", lt)
+	req.Header.Set("reqId", reqId)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var state qrState
+	if err := json.NewDecoder(resp.Body).Decode(&state); err != nil {
+		return nil, err
+	}
+	return &state, nil
+}
+
+func getSessionDirect(client *http.Client, toURL string) (*Session, error) {
+	reqURL := APIBase + "/getSessionForPC.action"
+	q := url.Values{
+		"rand":        {strconv.FormatInt(time.Now().UnixMilli(), 10)},
+		"clientType":  {ClientType},
+		"version":     {Version},
+		"channelId":   {ChannelID},
+		"redirectURL": {toURL},
+	}
+	reqURL += "?" + q.Encode()
+
+	req, _ := http.NewRequest("POST", reqURL, nil)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json;charset=UTF-8")
+	req.Header.Set("User-Agent", "desktop")
+	req.Header.Set("Referer", "https://api.cloud.189.cn")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("请求会话失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	var s Session
+	if err := json.Unmarshal(body, &s); err != nil {
+		return nil, fmt.Errorf("解析会话响应失败 (redirectURL=%s): %w\n响应内容: %s", toURL, err, string(body[:200]))
+	}
+	if s.Key == "" || s.Secret == "" {
+		return nil, fmt.Errorf("session 无效 (redirectURL=%s): %s", toURL, string(body[:200]))
+	}
+	return &s, nil
+}
+
+func qrGetAppConf(client *http.Client, referer, appKey, lt, reqId string) (*appConfig, error) {
+	r, _ := http.NewRequest("POST", "https://open.e.189.cn/api/logbox/oauth2/appConf.do",
+		strings.NewReader(url.Values{"version": {"2.0"}, "appKey": {appKey}}.Encode()))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.Header.Set("Origin", "https://open.e.189.cn")
+	r.Header.Set("Referer", referer)
+	r.Header.Set("Reqid", reqId)
+	r.Header.Set("lt", lt)
+
+	resp, err := client.Do(r)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Data appConfig `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	return &result.Data, nil
+}
+
+type appConfig struct {
+	AccountType string `json:"accountType"`
+	AppKey      string `json:"appKey"`
+	ClientType  int    `json:"clientType"`
+	IsOauth2    bool   `json:"isOauth2"`
+	MailSuffix  string `json:"mailSuffix"`
+	ParamID     string `json:"paramId"`
+	ReturnURL   string `json:"returnUrl"`
+}
+
+// ────────── Main ──────────
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Println(`yd - 天翼云盘命令行工具
 
 用法:
-  yd upload <本地文件路径>  [-p 文件夹ID]  上传文件到云盘
-  yd download <文件名>                     下载文件到当前目录
-  yd url <文件名>                          输出下载链接 (配合curl/wget使用)
-  yd ls [文件夹ID]                         列出云盘文件
+  yd login [用户名] [密码]         登录并生成配置文件
+  yd upload <文件路径> [-p 目录ID]  上传文件到云盘
+  yd download <文件名>              下载文件到当前目录
+  yd url <文件名>                  输出下载链接 (配合curl/wget使用)
+  yd ls [文件夹ID]                 列出云盘文件
 
-配置文件 config.json 需放在与可执行文件同一目录`)
+配置文件 config.json 自动生成在与可执行文件同一目录`)
 		os.Exit(1)
+	}
+
+	cmd := os.Args[1]
+	if cmd == "login" {
+		cmdLogin(os.Args[2:])
+		return
 	}
 
 	cfg, err := loadConfig()
@@ -237,7 +471,6 @@ func main() {
 	}
 	session = cfg.Session
 
-	cmd := os.Args[1]
 	switch cmd {
 	case "upload":
 		cmdUpload(os.Args[2:])
@@ -500,12 +733,12 @@ func cmdURL(args []string) {
 		os.Exit(1)
 	}
 	name := args[0]
-	url, err := getDownloadURL(name)
+	dlURL, err := getDownloadURL(name)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	fmt.Println(url)
+	fmt.Println(dlURL)
 }
 
 // ────────── Download ──────────
