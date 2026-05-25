@@ -868,10 +868,10 @@ func doList(folderID string) error {
 	}
 
 	for _, f := range folders {
-		fmt.Printf("%-20s %-15s %s %s\n", f.Name, "[DIR]", f.ID.String(), "-")
+		fmt.Printf("%-30s %-6s %s\n", f.Name, "[DIR]", f.ID.String())
 	}
 	for _, f := range files {
-		fmt.Printf("%-20s %-15s %s %s\n", f.Name, formatSize(f.Size), f.ID.String(), "file")
+		fmt.Printf("%-30s %-8s %s\n", f.Name, formatSize(f.Size), f.ID.String())
 	}
 	return nil
 }
