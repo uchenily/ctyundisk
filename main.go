@@ -937,19 +937,60 @@ func cmdList(args []string) {
 	}
 }
 
-func doList(folderID string) error {
-	files, folders, err := listFilesPage(folderID, 1)
-	if err != nil {
-		return err
-	}
+// use github.com/mattn/go-runewidth?
+func displayWidth(s string) int {
+    width := 0
+    for _, r := range s {
+        // 判断是否为宽字符（常见中文、全角字符）
+        if (r >= 0x4E00 && r <= 0x9FFF) || // 基本汉字
+            (r >= 0x3400 && r <= 0x4DBF) || // 扩展 A
+            (r >= 0x20000 && r <= 0x2A6DF) || // 扩展 B
+            (r >= 0xF900 && r <= 0xFAFF) || // 兼容汉字
+            (r >= 0xFF00 && r <= 0xFFEF) { // 全角标点/数字/字母
+            width += 2
+        } else {
+            width += 1
+        }
+    }
+    return width
+}
 
-	for _, f := range folders {
-		fmt.Printf("%-30s %-6s\n", f.Name, "[DIR]")
-	}
-	for _, f := range files {
-		fmt.Printf("%-30s %-8s\n", f.Name, formatSize(f.Size))
-	}
-	return nil
+func doList(folderID string) error {
+    files, folders, err := listFilesPage(folderID, 1)
+    if err != nil {
+        return err
+    }
+
+    // 构建一个结构体保存每条记录
+    type Item struct {
+        Name string
+        Info string
+    }
+    var items []Item
+
+    for _, f := range folders {
+        items = append(items, Item{Name: f.Name, Info: "[DIR]"})
+    }
+    for _, f := range files {
+        items = append(items, Item{Name: f.Name, Info: formatSize(f.Size)})
+    }
+
+    // 计算最大显示宽度
+    maxNameWidth := 0
+    for _, it := range items {
+        w := displayWidth(it.Name)
+        if w > maxNameWidth {
+            maxNameWidth = w
+        }
+    }
+
+    // 对齐打印
+    for _, it := range items {
+        nameWidth := displayWidth(it.Name)
+        padding := maxNameWidth - nameWidth
+        fmt.Printf("%s%s %s\n", it.Name, strings.Repeat(" ", padding), it.Info)
+    }
+    return nil
 }
 
 func listFilesPage(folderID string, page int) (files, folders []cloudFile, err error) {
