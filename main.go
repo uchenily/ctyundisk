@@ -17,7 +17,7 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"os"
-	"path/filepath"
+	// "path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -49,11 +49,12 @@ type Config struct {
 var session *Session
 
 func configPath() (string, error) {
-	exe, err := os.Executable()
-	if err != nil {
-		return "", fmt.Errorf("获取可执行文件路径失败: %w", err)
-	}
-	return filepath.Join(filepath.Dir(exe), "config.json"), nil
+	// exe, err := os.Executable()
+	// if err != nil {
+	// 	return "", fmt.Errorf("获取可执行文件路径失败: %w", err)
+	// }
+	// return filepath.Join(filepath.Dir(exe), "config.json"), nil
+	return "./config.json", nil
 }
 
 func loadConfig() (*Config, error) {
