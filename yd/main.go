@@ -1,0 +1,697 @@
+package main
+
+import (
+	"bytes"
+	"crypto/aes"
+	"crypto/hmac"
+	"crypto/md5"
+	"crypto/sha1"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"math"
+	"math/rand"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const (
+	APIBase    = "https://api.cloud.189.cn"
+	UploadBase = "https://upload.cloud.189.cn"
+
+	ClientType = "TELEPC"
+	Version    = "7.1.8.0"
+	ChannelID  = "web_cloud.189.cn"
+
+	RootFolder = "-11"
+	SliceSize  = 10 * 1024 * 1024
+)
+
+type Session struct {
+	Key          string `json:"sessionKey"`
+	Secret       string `json:"sessionSecret"`
+	AccessToken  string `json:"accessToken"`
+	RefreshToken string `json:"refreshToken"`
+}
+
+type Config struct {
+	Session *Session `json:"session,omitempty"`
+}
+
+var session *Session
+
+func loadConfig() (*Config, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("获取可执行文件路径失败: %w", err)
+	}
+	dir := filepath.Dir(exe)
+	path := filepath.Join(dir, "config.json")
+
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("打开配置文件失败 %s: %w", path, err)
+	}
+	defer f.Close()
+
+	var cfg Config
+	if err := json.NewDecoder(f).Decode(&cfg); err != nil {
+		return nil, fmt.Errorf("解析配置文件失败: %w", err)
+	}
+	if cfg.Session == nil || cfg.Session.Key == "" || cfg.Session.Secret == "" {
+		return nil, fmt.Errorf("配置文件中缺少有效的 session.sessionKey / session.sessionSecret")
+	}
+	return &cfg, nil
+}
+
+func hmacSha1(data, key string) string {
+	mac := hmac.New(sha1.New, []byte(key))
+	mac.Write([]byte(data))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func aesEncryptECB(data, key []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	bs := block.BlockSize()
+	padded := pkcs7Pad(data, bs)
+	enc := make([]byte, len(padded))
+	for i := 0; i < len(padded); i += bs {
+		block.Encrypt(enc[i:i+bs], padded[i:i+bs])
+	}
+	return enc, nil
+}
+
+func pkcs7Pad(data []byte, bs int) []byte {
+	pad := bs - len(data)%bs
+	return append(data, bytes.Repeat([]byte{byte(pad)}, pad)...)
+}
+
+func randomUUID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+func customEncode(v url.Values) string {
+	if v == nil {
+		return ""
+	}
+	var buf strings.Builder
+	for k, vals := range v {
+		for _, val := range vals {
+			if buf.Len() > 0 {
+				buf.WriteByte('&')
+			}
+			buf.WriteString(k)
+			buf.WriteByte('=')
+			buf.WriteString(val)
+		}
+	}
+	return buf.String()
+}
+
+func signRequest(req *http.Request) {
+	now := time.Now()
+
+	q := req.URL.Query()
+	q.Set("rand", strconv.FormatInt(now.UnixMilli(), 10))
+	q.Set("clientType", ClientType)
+	q.Set("version", Version)
+	q.Set("channelId", ChannelID)
+	req.URL.RawQuery = q.Encode()
+
+	date := now.Format(time.RFC1123)
+	signData := fmt.Sprintf("SessionKey=%s&Operate=%s&RequestURI=%s&Date=%s",
+		session.Key, req.Method, req.URL.Path, date)
+	if req.URL.Host == "upload.cloud.189.cn" {
+		signData += "&params=" + q.Get("params")
+	}
+
+	req.Header.Set("Date", date)
+	req.Header.Set("SessionKey", session.Key)
+	req.Header.Set("Signature", hmacSha1(signData, session.Secret))
+	req.Header.Set("X-Request-ID", randomUUID())
+	req.Header.Set("Accept", "application/json;charset=UTF-8")
+	req.Header.Set("User-Agent", "desktop")
+}
+
+func apiGet(path string, params url.Values) (*http.Request, error) {
+	req, err := http.NewRequest("GET", APIBase+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if len(params) > 0 {
+		req.URL.RawQuery = params.Encode()
+	}
+	return req, nil
+}
+
+func doAPI(req *http.Request, result any) error {
+	signRequest(req)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	if result != nil {
+		return json.Unmarshal(body, result)
+	}
+	return nil
+}
+
+func buildUploadRequest(path string, params url.Values) (*http.Request, error) {
+	plain := customEncode(params)
+	enc, err := aesEncryptECB([]byte(plain), []byte(session.Secret[:16]))
+	if err != nil {
+		return nil, err
+	}
+	vals := make(url.Values)
+	vals.Set("params", hex.EncodeToString(enc))
+
+	req, err := http.NewRequest("GET", UploadBase+path+"?"+vals.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Cache-Control", "no-cache")
+	req.Header.Set("decodefields", "familyId,parentFolderId,fileName,fileMd5,fileSize,sliceMd5,sliceSize,albumId,extend,lazyCheck,isLog")
+	return req, nil
+}
+
+func doUploadAPI(req *http.Request, result any) error {
+	client := &http.Client{Timeout: 0}
+	signRequest(req)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("上传API错误 HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	if result != nil {
+		return json.Unmarshal(body, result)
+	}
+	return nil
+}
+
+func main() {
+	if len(os.Args) < 2 {
+		fmt.Println(`yd - 天翼云盘命令行工具
+
+用法:
+  yd upload <本地文件路径>  [-p 文件夹ID]  上传文件到云盘
+  yd download <文件名>                     下载文件到当前目录
+  yd url <文件名>                          输出下载链接 (配合curl/wget使用)
+  yd ls [文件夹ID]                         列出云盘文件
+
+配置文件 config.json 需放在与可执行文件同一目录`)
+		os.Exit(1)
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	session = cfg.Session
+
+	cmd := os.Args[1]
+	switch cmd {
+	case "upload":
+		cmdUpload(os.Args[2:])
+	case "download":
+		cmdDownload(os.Args[2:])
+	case "url":
+		cmdURL(os.Args[2:])
+	case "ls":
+		cmdList(os.Args[2:])
+	default:
+		fmt.Fprintf(os.Stderr, "未知命令: %s\n", cmd)
+		os.Exit(1)
+	}
+}
+
+// ────────── Upload ──────────
+
+func cmdUpload(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "用法: yd upload <本地文件路径> [-p 文件夹ID]")
+		os.Exit(1)
+	}
+
+	localPath := args[0]
+	parentID := RootFolder
+
+	remaining := args[1:]
+	for i := 0; i < len(remaining); i++ {
+		if remaining[i] == "-p" && i+1 < len(remaining) {
+			parentID = remaining[i+1]
+			i++
+		}
+	}
+
+	if err := doUpload(localPath, parentID); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func doUpload(localPath, parentID string) error {
+	req, _ := apiGet("/keepUserSession.action", nil)
+	doAPI(req, nil)
+
+	f, err := os.Open(localPath)
+	if err != nil {
+		return fmt.Errorf("打开本地文件失败: %w", err)
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return fmt.Errorf("不支持上传目录")
+	}
+
+	fileSize := info.Size()
+	fileName := info.Name()
+	sliceNum := int(math.Ceil(float64(fileSize) / float64(SliceSize)))
+
+	fmt.Printf("上传 %s (%d 字节, %d 分片)...\n", fileName, fileSize, sliceNum)
+
+	fileMD5, sliceMD5, partNames := calcFileMD5(f, fileSize, sliceNum)
+
+	params := make(url.Values)
+	params.Set("parentFolderId", parentID)
+	params.Set("fileName", fileName)
+	params.Set("fileSize", strconv.FormatInt(fileSize, 10))
+	params.Set("sliceSize", strconv.Itoa(SliceSize))
+	params.Set("fileMd5", fileMD5)
+	params.Set("sliceMd5", sliceMD5)
+	params.Set("extend", `{"opScene":"1","relativepath":"","rootfolderid":""}`)
+
+	var initResp struct {
+		Code string `json:"code"`
+		Data struct {
+			UploadFileId   string `json:"uploadFileId"`
+			FileDataExists int    `json:"fileDataExists"`
+		} `json:"data"`
+	}
+
+	req, err = buildUploadRequest("/person/initMultiUpload", params)
+	if err != nil {
+		return err
+	}
+	if err := doUploadAPI(req, &initResp); err != nil {
+		return fmt.Errorf("初始化上传失败: %w", err)
+	}
+
+	uploadFileID := initResp.Data.UploadFileId
+	if uploadFileID == "" {
+		return fmt.Errorf("获取 uploadFileId 失败")
+	}
+
+	if initResp.Data.FileDataExists != 1 {
+		partInfoParts := make([]string, sliceNum)
+		for i := 0; i < sliceNum; i++ {
+			partInfoParts[i] = fmt.Sprintf("%d-%s", i+1, partNames[i])
+		}
+
+		urlParams := make(url.Values)
+		urlParams.Set("partInfo", strings.Join(partInfoParts, ","))
+		urlParams.Set("uploadFileId", uploadFileID)
+
+		var urlResp struct {
+			Code string `json:"code"`
+			Data map[string]struct {
+				RequestURL    string `json:"requestURL"`
+				RequestHeader string `json:"requestHeader"`
+			} `json:"uploadUrls"`
+		}
+
+		req, err = buildUploadRequest("/person/getMultiUploadUrls", urlParams)
+		if err != nil {
+			return err
+		}
+		if err := doUploadAPI(req, &urlResp); err != nil {
+			return fmt.Errorf("获取上传URL失败: %w", err)
+		}
+
+		_, _ = f.Seek(0, 0)
+		for i := 0; i < sliceNum; i++ {
+			num := strconv.Itoa(i + 1)
+			partInfo := urlResp.Data["partNumber_"+num]
+			if partInfo.RequestURL == "" {
+				return fmt.Errorf("分片 %s 上传URL为空", num)
+			}
+
+			offset := int64(i) * SliceSize
+			size := int64(SliceSize)
+			if offset+size > fileSize {
+				size = fileSize - offset
+			}
+			section := io.NewSectionReader(f, offset, size)
+
+			putReq, err := http.NewRequest("PUT", partInfo.RequestURL, section)
+			if err != nil {
+				return err
+			}
+			for _, hdr := range strings.Split(partInfo.RequestHeader, "&") {
+				idx := strings.Index(hdr, "=")
+				if idx > 0 {
+					putReq.Header.Set(hdr[:idx], hdr[idx+1:])
+				}
+			}
+
+			fmt.Printf("\r上传分片 %d/%d...", i+1, sliceNum)
+			putResp, err := http.DefaultClient.Do(putReq)
+			if err != nil {
+				return fmt.Errorf("上传分片 %d 失败: %w", i+1, err)
+			}
+			putResp.Body.Close()
+			if putResp.StatusCode != 200 {
+				return fmt.Errorf("上传分片 %d HTTP %d", i+1, putResp.StatusCode)
+			}
+		}
+		fmt.Println()
+	} else {
+		fmt.Println("秒传成功！")
+	}
+
+	commitParams := make(url.Values)
+	commitParams.Set("uploadFileId", uploadFileID)
+	if initResp.Data.FileDataExists == 1 {
+		commitParams.Set("lazyCheck", "0")
+	} else {
+		commitParams.Set("fileMd5", fileMD5)
+		commitParams.Set("sliceMd5", sliceMD5)
+		commitParams.Set("lazyCheck", "1")
+	}
+
+	var commitResp struct {
+		Code string `json:"code"`
+		File struct {
+			Id string `json:"userFileId"`
+		} `json:"file"`
+	}
+	req, err = buildUploadRequest("/person/commitMultiUploadFile", commitParams)
+	if err != nil {
+		return err
+	}
+	if err := doUploadAPI(req, &commitResp); err != nil {
+		return fmt.Errorf("提交上传失败: %w", err)
+	}
+
+	dlURL, err := getDownloadURLByID(commitResp.File.Id)
+	if err != nil {
+		dlURL = "(获取下载链接失败)"
+	}
+	fmt.Printf("上传完成: %s\n%s\n", fileName, dlURL)
+	return nil
+}
+
+func calcFileMD5(f *os.File, fileSize int64, sliceNum int) (fileMD5, sliceMD5 string, partNames []string) {
+	_, _ = f.Seek(0, 0)
+
+	global := md5.New()
+	detail := md5.New()
+	writer := io.MultiWriter(global, detail)
+	slices := make([]string, sliceNum)
+	partNames = make([]string, sliceNum)
+	buf := make([]byte, 32*1024)
+
+	for i := 0; i < sliceNum; i++ {
+		detail.Reset()
+		offset := int64(i) * SliceSize
+		size := int64(SliceSize)
+		if offset+size > fileSize {
+			size = fileSize - offset
+		}
+		s := io.NewSectionReader(f, offset, size)
+		io.CopyBuffer(writer, s, buf)
+		hash := detail.Sum(nil)
+		slices[i] = strings.ToUpper(hex.EncodeToString(hash))
+		partNames[i] = base64.StdEncoding.EncodeToString(hash)
+	}
+
+	fileMD5 = hex.EncodeToString(global.Sum(nil))
+	if sliceNum > 1 {
+		h := md5.New()
+		h.Write([]byte(strings.Join(slices, "\n")))
+		sliceMD5 = hex.EncodeToString(h.Sum(nil))
+	} else {
+		sliceMD5 = fileMD5
+	}
+	return
+}
+
+func getDownloadURLByID(fileID string) (string, error) {
+	req, err := apiGet("/getFileDownloadUrl.action", url.Values{"fileId": {fileID}})
+	if err != nil {
+		return "", err
+	}
+
+	var info struct {
+		FileDownloadURL string `json:"fileDownloadUrl"`
+	}
+	if err := doAPI(req, &info); err != nil {
+		return "", fmt.Errorf("获取下载链接失败: %w", err)
+	}
+	if info.FileDownloadURL == "" {
+		return "", fmt.Errorf("获取下载链接为空")
+	}
+	return info.FileDownloadURL, nil
+}
+
+func getDownloadURL(name string) (string, error) {
+	fileID, _, err := findFileID(RootFolder, name)
+	if err != nil {
+		return "", err
+	}
+	return getDownloadURLByID(fileID)
+}
+
+func cmdURL(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "用法: yd url <文件名>")
+		os.Exit(1)
+	}
+	name := args[0]
+	url, err := getDownloadURL(name)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Println(url)
+}
+
+// ────────── Download ──────────
+
+func cmdDownload(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "用法: yd download <文件名>")
+		os.Exit(1)
+	}
+	name := args[0]
+	if err := doDownload(name); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func doDownload(name string) error {
+	fileID, fileSize, err := findFileID(RootFolder, name)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("下载 %s (%d 字节, ID=%s)...\n", name, fileSize, fileID)
+
+	downloadURL, err := getDownloadURL(name)
+	if err != nil {
+		return err
+	}
+
+	return downloadFile(downloadURL, name, fileSize)
+}
+
+func findFileID(parentID, name string) (string, int64, error) {
+	files, _, err := listFilesPage(parentID, 1)
+	if err != nil {
+		return "", 0, err
+	}
+	for _, f := range files {
+		if f.Name == name {
+			return f.ID.String(), f.Size, nil
+		}
+	}
+	return "", 0, fmt.Errorf("文件未找到: %s", name)
+}
+
+func downloadFile(downloadURL, localName string, totalSize int64) error {
+	var offset int64
+
+	info, err := os.Stat(localName)
+	if err == nil {
+		offset = info.Size()
+		if offset >= totalSize {
+			fmt.Println("文件已完整下载")
+			return nil
+		}
+	}
+
+	file, err := os.OpenFile(localName, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	req, err := http.NewRequest("GET", downloadURL, nil)
+	if err != nil {
+		return err
+	}
+	if offset > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, totalSize))
+		fmt.Printf("从断点 %d 续传...\n", offset)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("下载失败 HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	written, err := io.Copy(file, resp.Body)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("下载完成: %s (%d 字节)\n", localName, offset+written)
+	return nil
+}
+
+// ────────── List ──────────
+
+type cloudFile struct {
+	ID   json.Number `json:"id"`
+	Name string      `json:"name"`
+	Size int64       `json:"size"`
+	IsDir bool
+}
+
+type listResp struct {
+	ResCode    int    `json:"res_code"`
+	ResMessage string `json:"res_message"`
+	FileListAO struct {
+		Count        int         `json:"count"`
+		FileListSize int         `json:"fileListSize"`
+		FileList     []cloudFile `json:"fileList"`
+		FolderList   []cloudFile `json:"folderList"`
+	} `json:"fileListAO"`
+}
+
+func cmdList(args []string) {
+	folderID := RootFolder
+	if len(args) >= 1 {
+		folderID = args[0]
+	}
+	if err := doList(folderID); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func doList(folderID string) error {
+	files, folders, err := listFilesPage(folderID, 1)
+	if err != nil {
+		return err
+	}
+
+	for _, f := range folders {
+		fmt.Printf("%-20s %-15s %s %s\n", f.Name, "[DIR]", f.ID.String(), "-")
+	}
+	for _, f := range files {
+		fmt.Printf("%-20s %-15s %s %s\n", f.Name, formatSize(f.Size), f.ID.String(), "file")
+	}
+	return nil
+}
+
+func listFilesPage(folderID string, page int) (files, folders []cloudFile, err error) {
+	req, err := apiGet("/listFiles.action", url.Values{
+		"folderId":   {folderID},
+		"fileType":   {"0"},
+		"mediaType":  {"0"},
+		"mediaAttr":  {"0"},
+		"iconOption": {"0"},
+		"orderBy":    {"filename"},
+		"descending": {"true"},
+		"pageNum":    {strconv.Itoa(page)},
+		"pageSize":   {"100"},
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var resp listResp
+	if err := doAPI(req, &resp); err != nil {
+		return nil, nil, err
+	}
+
+	files = resp.FileListAO.FileList
+	folders = resp.FileListAO.FolderList
+
+	for i := range folders {
+		folders[i].IsDir = true
+	}
+
+	if 100*page < resp.FileListAO.Count {
+		moreFiles, moreFolders, err := listFilesPage(folderID, page+1)
+		if err != nil {
+			return nil, nil, err
+		}
+		files = append(files, moreFiles...)
+		folders = append(folders, moreFolders...)
+	}
+
+	return files, folders, nil
+}
+
+func formatSize(size int64) string {
+	const unit = 1024
+	if size < unit {
+		return fmt.Sprintf("%d B", size)
+	}
+	div, exp := int64(unit), 0
+	for n := size / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(size)/float64(div), "KMGTPE"[exp])
+}
