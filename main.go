@@ -17,6 +17,7 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -50,9 +51,11 @@ type Session struct {
 
 type Config struct {
 	Session *Session `json:"session,omitempty"`
+	WorkDir string   `json:"workDir,omitempty"`
 }
 
 var session *Session
+var config *Config
 
 func configPath() (string, error) {
 	// exe, err := os.Executable()
@@ -90,6 +93,12 @@ func loadConfig() (*Config, error) {
 	}
 	if cfg.Session == nil || cfg.Session.Key == "" || cfg.Session.Secret == "" {
 		return nil, fmt.Errorf("配置文件中缺少有效的 session.sessionKey / session.sessionSecret")
+	}
+	if cfg.WorkDir != "" && !strings.HasPrefix(cfg.WorkDir, "/") {
+		return nil, fmt.Errorf("配置文件中的 workDir 必须是绝对路径，例如 /同步盘")
+	}
+	if cfg.WorkDir != "" {
+		cfg.WorkDir = cleanCloudPath(cfg.WorkDir)
 	}
 	return &cfg, nil
 }
@@ -472,6 +481,7 @@ func main() {
   yd ls [路径]                      列出云盘目录内容
 
 路径格式为 Unix 风格，如 /同步盘/yd , /我的文档
+配置文件可选 workDir 作为默认目录，此时相对路径会基于该目录解析
 根目录用 / 表示`)
 		os.Exit(1)
 	}
@@ -487,6 +497,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	config = cfg
 	session = cfg.Session
 
 	switch cmd {
@@ -506,8 +517,34 @@ func main() {
 
 // ────────── Path Resolution ──────────
 
+func cleanCloudPath(p string) string {
+	cleaned := path.Clean("/" + strings.TrimPrefix(strings.TrimSpace(p), "/"))
+	if cleaned == "." {
+		return "/"
+	}
+	return cleaned
+}
+
+func defaultCloudPath() string {
+	if config != nil && config.WorkDir != "" {
+		return config.WorkDir
+	}
+	return "/"
+}
+
+func resolveCloudPath(p string) string {
+	if strings.TrimSpace(p) == "" {
+		return defaultCloudPath()
+	}
+	if strings.HasPrefix(p, "/") {
+		return cleanCloudPath(p)
+	}
+	return cleanCloudPath(path.Join(defaultCloudPath(), p))
+}
+
 func pathToID(path string) (id string, isDir bool, size int64, err error) {
-	if path == "" || path == "/" {
+	path = resolveCloudPath(path)
+	if path == "/" {
 		return RootFolder, true, 0, nil
 	}
 	cleanPath := strings.TrimPrefix(path, "/")
@@ -560,7 +597,7 @@ func cmdUpload(args []string) {
 	}
 
 	localPath := args[0]
-	parentPath := "/"
+	parentPath := ""
 	if len(args) == 2 {
 		parentPath = args[1]
 	}
@@ -806,8 +843,8 @@ func cmdURL(args []string) {
 		fmt.Fprintln(os.Stderr, "用法: yd url <文件路径>")
 		os.Exit(1)
 	}
-	path := args[0]
-	dlURL, err := getDownloadURL(path)
+	filePath := args[0]
+	dlURL, err := getDownloadURL(filePath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -822,8 +859,8 @@ func cmdDownload(args []string) {
 		fmt.Fprintln(os.Stderr, "用法: yd download <文件路径>")
 		os.Exit(1)
 	}
-	path := args[0]
-	if err := doDownload(path); err != nil {
+	filePath := args[0]
+	if err := doDownload(filePath); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -920,7 +957,7 @@ type listResp struct {
 }
 
 func cmdList(args []string) {
-	path := "/"
+	path := ""
 	if len(args) >= 1 {
 		path = args[0]
 	}

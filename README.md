@@ -16,9 +16,12 @@ make
 # 登录（自动生成配置文件）
 yd login [用户名] [密码]
 
+# 默认列出配置中的 workDir；未配置时列根目录
+yd ls
+
 # 列出文件
-yd ls                  # 根目录
-yd ls <文件路径>       # 指定文件路径
+yd ls /                # 根目录
+yd ls <文件路径>       # 支持绝对路径或相对 workDir 的路径
 
 # 上传（完成后输出下载链接）
 yd upload <文件路径>
@@ -42,6 +45,13 @@ yd upload video.mp4
 
 # 上传到「我的文档」
 yd upload doc.pdf /我的文档
+
+# 配置 ~/.yd.conf 后：
+# { "workDir": "/同步盘", "session": { ... } }
+# 下面几条都会基于 /同步盘
+yd ls
+yd upload doc.pdf
+yd download 资料/video.mp4
 
 # 用 curl 下载
 yd url video.mp4 | xargs curl -o video.mp4 -L
