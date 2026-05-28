@@ -22,7 +22,7 @@ yd ls <文件路径>       # 指定文件路径
 
 # 上传（完成后输出下载链接）
 yd upload <文件路径>
-yd upload <文件路径> -p <文件夹>
+yd upload <文件路径> <文件夹>
 
 # 下载
 yd download <文件路径>
@@ -41,7 +41,7 @@ yd login
 yd upload video.mp4
 
 # 上传到「我的文档」
-yd upload doc.pdf -p /我的文档
+yd upload doc.pdf /我的文档
 
 # 用 curl 下载
 yd url video.mp4 | xargs curl -o video.mp4 -L

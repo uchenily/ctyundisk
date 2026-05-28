@@ -466,7 +466,7 @@ func main() {
 
 用法:
   yd login                         登录并生成配置文件
-  yd upload <文件路径> [-p 路径]     上传文件到云盘路径
+  yd upload <文件路径> [路径]        上传文件到云盘路径
   yd download <文件路径>             下载文件到当前目录
   yd url <文件路径>                  输出下载链接 (配合curl/wget使用)
   yd ls [路径]                      列出云盘目录内容
@@ -554,20 +554,15 @@ func pathToID(path string) (id string, isDir bool, size int64, err error) {
 // ────────── Upload ──────────
 
 func cmdUpload(args []string) {
-	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "用法: yd upload <本地文件路径> [-p 路径]")
+	if len(args) < 1 || len(args) > 2 {
+		fmt.Fprintln(os.Stderr, "用法: yd upload <本地文件路径> [目标目录]")
 		os.Exit(1)
 	}
 
 	localPath := args[0]
 	parentPath := "/"
-
-	remaining := args[1:]
-	for i := 0; i < len(remaining); i++ {
-		if remaining[i] == "-p" && i+1 < len(remaining) {
-			parentPath = remaining[i+1]
-			i++
-		}
+	if len(args) == 2 {
+		parentPath = args[1]
 	}
 
 	parentID, isDir, _, err := pathToID(parentPath)
