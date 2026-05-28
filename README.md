@@ -56,3 +56,7 @@ yd download video.mp4
 - 大文件自动分片上传（10MB/片）
 - 秒传检测，已存在的文件免上传
 - 断点续传下载
+
+## 参考项目
+
+https://github.com/gowsp/cloud189

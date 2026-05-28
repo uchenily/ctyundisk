@@ -36,8 +36,14 @@ const (
 )
 
 type Session struct {
+	LoginName    string `json:"loginName,omitempty"`
 	Key          string `json:"sessionKey"`
 	Secret       string `json:"sessionSecret"`
+	KeepAlive    int    `json:"keepAlive,omitempty"`
+	FileDiffSpan int    `json:"getFileDiffSpan,omitempty"`
+	UserInfoSpan int    `json:"getUserInfoSpan,omitempty"`
+	FamilyKey    string `json:"familySessionKey,omitempty"`
+	FamilySecret string `json:"familySessionSecret,omitempty"`
 	AccessToken  string `json:"accessToken"`
 	RefreshToken string `json:"refreshToken"`
 }
@@ -309,7 +315,7 @@ func cmdLogin(args []string) {
 
 	qrURL := fmt.Sprintf("https://open.e.189.cn/api/logbox/oauth2/image.do?REQID=%s&uuid=%s",
 		reqId, qrReq.Encodeuuid)
-	fmt.Println("\n请用浏览器打开以下链接，用手机天翼云盘扫码登录:")
+	fmt.Println("\n请用浏览器打开以下链接，用手机天翼云盘/微信/支付宝扫码登录:")
 	fmt.Println(qrURL)
 	fmt.Println()
 
@@ -705,6 +711,7 @@ func doUpload(localPath, parentID string) error {
 
 	commitParams := make(url.Values)
 	commitParams.Set("uploadFileId", uploadFileID)
+	commitParams.Set("opertype", "3")  // 同名文件覆盖
 	if initResp.Data.FileDataExists == 1 {
 		commitParams.Set("lazyCheck", "0")
 	} else {
