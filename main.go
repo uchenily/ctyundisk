@@ -498,8 +498,11 @@ func printQRCode(client *http.Client, qrURL string) error {
 
 	bounds := img.Bounds()
 	qrWidth := bounds.Dx()
-	termCols := terminalColumns()
-	maxModules := max(1, (termCols*3)/(4*2))
+	termRows, termCols := terminalSize()
+	maxModules := max(1, (termRows*3)/4)
+	if termCols > 0 {
+		maxModules = min(maxModules, termCols/2)
+	}
 	scale := 1
 	if qrWidth > maxModules {
 		scale = (qrWidth + maxModules - 1) / maxModules
@@ -531,24 +534,34 @@ func printQRCode(client *http.Client, qrURL string) error {
 	return nil
 }
 
-func terminalColumns() int {
-	if cols, ok := terminalColumnsFromEnv(); ok {
-		return cols
+func terminalSize() (rows, cols int) {
+	rows, cols = terminalSizeFromEnv()
+	if rows > 0 && cols > 0 {
+		return rows, cols
 	}
 
 	ws, err := getWinSize()
-	if err == nil && ws.Col > 0 {
-		return int(ws.Col)
+	if err == nil {
+		if rows <= 0 && ws.Row > 0 {
+			rows = int(ws.Row)
+		}
+		if cols <= 0 && ws.Col > 0 {
+			cols = int(ws.Col)
+		}
 	}
-	return 80
+	if rows <= 0 {
+		rows = 24
+	}
+	if cols <= 0 {
+		cols = 80
+	}
+	return rows, cols
 }
 
-func terminalColumnsFromEnv() (int, bool) {
-	cols, err := strconv.Atoi(strings.TrimSpace(os.Getenv("COLUMNS")))
-	if err != nil || cols <= 0 {
-		return 0, false
-	}
-	return cols, true
+func terminalSizeFromEnv() (rows, cols int) {
+	rows, _ = strconv.Atoi(strings.TrimSpace(os.Getenv("LINES")))
+	cols, _ = strconv.Atoi(strings.TrimSpace(os.Getenv("COLUMNS")))
+	return rows, cols
 }
 
 type winsize struct {
