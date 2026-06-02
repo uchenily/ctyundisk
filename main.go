@@ -10,6 +10,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"math"
 	"math/rand"
@@ -21,7 +26,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
+	"unsafe"
 )
 
 const (
@@ -76,6 +83,17 @@ func configPath() (string, error) {
 }
 
 func loadConfig() (*Config, error) {
+	cfg, err := loadStoredConfig()
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Session == nil || cfg.Session.Key == "" || cfg.Session.Secret == "" {
+		return nil, fmt.Errorf("配置文件中缺少有效的 session.sessionKey / session.sessionSecret")
+	}
+	return cfg, nil
+}
+
+func loadStoredConfig() (*Config, error) {
 	path, err := configPath()
 	if err != nil {
 		return nil, err
@@ -90,9 +108,6 @@ func loadConfig() (*Config, error) {
 	var cfg Config
 	if err := json.NewDecoder(f).Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("解析配置文件失败: %w", err)
-	}
-	if cfg.Session == nil || cfg.Session.Key == "" || cfg.Session.Secret == "" {
-		return nil, fmt.Errorf("配置文件中缺少有效的 session.sessionKey / session.sessionSecret")
 	}
 	if cfg.WorkDir != "" && !strings.HasPrefix(cfg.WorkDir, "/") {
 		return nil, fmt.Errorf("配置文件中的 workDir 必须是绝对路径，例如 /同步盘")
@@ -274,6 +289,10 @@ func cmdLogin(args []string) {
 
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Jar: jar, Timeout: 30 * time.Second}
+	workDir := ""
+	if cfg, err := loadStoredConfig(); err == nil && cfg.WorkDir != "" {
+		workDir = cfg.WorkDir
+	}
 
 	params := url.Values{
 		// Use appid from cloud189
@@ -324,8 +343,12 @@ func cmdLogin(args []string) {
 
 	qrURL := fmt.Sprintf("https://open.e.189.cn/api/logbox/oauth2/image.do?REQID=%s&uuid=%s",
 		reqId, qrReq.Encodeuuid)
-	fmt.Println("\n请用浏览器打开以下链接，用手机天翼云盘/微信/支付宝扫码登录:")
-	fmt.Println(qrURL)
+	fmt.Println("\n请用手机天翼云盘/微信/支付宝扫码登录:")
+	if err := printQRCode(client, qrURL); err != nil {
+		fmt.Fprintln(os.Stderr, "终端二维码渲染失败:", err)
+		fmt.Println("可回退为直接打开该链接查看二维码:")
+		fmt.Println(qrURL)
+	}
 	fmt.Println()
 
 	fmt.Print("等待扫码...")
@@ -344,7 +367,7 @@ func cmdLogin(args []string) {
 				fmt.Fprintln(os.Stderr, "获取会话失败:", err)
 				os.Exit(1)
 			}
-			if err := saveConfig(&Config{Session: session}); err != nil {
+			if err := saveConfig(&Config{Session: session, WorkDir: workDir}); err != nil {
 				fmt.Fprintln(os.Stderr, "保存配置失败:", err)
 				os.Exit(1)
 			}
@@ -368,17 +391,17 @@ type qrState struct {
 
 func qrCheckState(client *http.Client, qrReq *qrRequest, ac *appConfig, referer, appKey, lt, reqId string) (*qrState, error) {
 	params := url.Values{
-		"appId":      {appKey},
-		"encryuuid":  {qrReq.Encryuuid},
-		"uuid":       {qrReq.Uuid},
-		"returnUrl":  {ac.ReturnURL},
-		"clientType": {strconv.Itoa(ac.ClientType)},
-		"timeStamp":  {strconv.FormatInt(time.Now().UnixMilli(), 10)},
+		"appId":       {appKey},
+		"encryuuid":   {qrReq.Encryuuid},
+		"uuid":        {qrReq.Uuid},
+		"returnUrl":   {ac.ReturnURL},
+		"clientType":  {strconv.Itoa(ac.ClientType)},
+		"timeStamp":   {strconv.FormatInt(time.Now().UnixMilli(), 10)},
 		"cb_SaveName": {"0"},
-		"isOauth2":   {strconv.FormatBool(ac.IsOauth2)},
-		"state":      {""},
-		"paramId":    {ac.ParamID},
-		"date":       {time.Now().Format("2006-01-0215:04:059")},
+		"isOauth2":    {strconv.FormatBool(ac.IsOauth2)},
+		"state":       {""},
+		"paramId":     {ac.ParamID},
+		"date":        {time.Now().Format("2006-01-0215:04:059")},
 	}
 	u := "https://open.e.189.cn/api/logbox/oauth2/qrcodeLoginState.do?" + params.Encode()
 	req, _ := http.NewRequest("POST", u, nil)
@@ -457,6 +480,98 @@ func qrGetAppConf(client *http.Client, referer, appKey, lt, reqId string) (*appC
 	return &result.Data, nil
 }
 
+func printQRCode(client *http.Client, qrURL string) error {
+	req, err := http.NewRequest("GET", qrURL, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	img, _, err := image.Decode(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	bounds := img.Bounds()
+	qrWidth := bounds.Dx()
+	termCols := terminalColumns()
+	maxModules := max(1, (termCols*3)/(4*2))
+	scale := 1
+	if qrWidth > maxModules {
+		scale = (qrWidth + maxModules - 1) / maxModules
+	}
+
+	for y := bounds.Min.Y; y < bounds.Max.Y; y += 2 * scale {
+		var line strings.Builder
+		for x := bounds.Min.X; x < bounds.Max.X; x += scale {
+			topDark := isDark(img.At(x, y))
+			bottomDark := false
+			bottomY := y + scale
+			if bottomY < bounds.Max.Y {
+				bottomDark = isDark(img.At(x, bottomY))
+			}
+
+			switch {
+			case topDark && bottomDark:
+				line.WriteString("██")
+			case topDark:
+				line.WriteString("▀▀")
+			case bottomDark:
+				line.WriteString("▄▄")
+			default:
+				line.WriteString("  ")
+			}
+		}
+		fmt.Println(line.String())
+	}
+	return nil
+}
+
+func terminalColumns() int {
+	if cols, ok := terminalColumnsFromEnv(); ok {
+		return cols
+	}
+
+	ws, err := getWinSize()
+	if err == nil && ws.Col > 0 {
+		return int(ws.Col)
+	}
+	return 80
+}
+
+func terminalColumnsFromEnv() (int, bool) {
+	cols, err := strconv.Atoi(strings.TrimSpace(os.Getenv("COLUMNS")))
+	if err != nil || cols <= 0 {
+		return 0, false
+	}
+	return cols, true
+}
+
+type winsize struct {
+	Row    uint16
+	Col    uint16
+	Xpixel uint16
+	Ypixel uint16
+}
+
+func getWinSize() (*winsize, error) {
+	ws := &winsize{}
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, os.Stdout.Fd(), uintptr(syscall.TIOCGWINSZ), uintptr(unsafe.Pointer(ws)))
+	if errno != 0 {
+		return nil, errno
+	}
+	return ws, nil
+}
+
+func isDark(c color.Color) bool {
+	r, g, b, _ := c.RGBA()
+	return r+g+b < 3*0x8000
+}
+
 type appConfig struct {
 	AccountType string `json:"accountType"`
 	AppKey      string `json:"appKey"`
@@ -474,11 +589,11 @@ func main() {
 		fmt.Println(`yd - 天翼云盘命令行工具
 
 用法:
-  yd login                         登录并生成配置文件
+  yd login                           登录并生成配置文件
   yd upload <文件路径> [路径]        上传文件到云盘路径
   yd download <文件路径>             下载文件到当前目录
   yd url <文件路径>                  输出下载链接 (配合curl/wget使用)
-  yd ls [路径]                      列出云盘目录内容
+  yd ls [路径]                       列出云盘目录内容
 
 路径格式为 Unix 风格，如 /同步盘/yd , /我的文档
 配置文件可选 workDir 作为默认目录，此时相对路径会基于该目录解析
@@ -743,7 +858,7 @@ func doUpload(localPath, parentID string) error {
 
 	commitParams := make(url.Values)
 	commitParams.Set("uploadFileId", uploadFileID)
-	commitParams.Set("opertype", "3")  // 同名文件覆盖
+	commitParams.Set("opertype", "3") // 同名文件覆盖
 	if initResp.Data.FileDataExists == 1 {
 		commitParams.Set("lazyCheck", "0")
 	} else {
@@ -939,9 +1054,9 @@ func downloadFile(downloadURL, localName string, totalSize int64) error {
 // ────────── List ──────────
 
 type cloudFile struct {
-	ID   json.Number `json:"id"`
-	Name string      `json:"name"`
-	Size int64       `json:"size"`
+	ID    json.Number `json:"id"`
+	Name  string      `json:"name"`
+	Size  int64       `json:"size"`
 	IsDir bool
 }
 
@@ -978,58 +1093,58 @@ func cmdList(args []string) {
 
 // use github.com/mattn/go-runewidth?
 func displayWidth(s string) int {
-    width := 0
-    for _, r := range s {
-        // 判断是否为宽字符（常见中文、全角字符）
-        if (r >= 0x4E00 && r <= 0x9FFF) || // 基本汉字
-            (r >= 0x3400 && r <= 0x4DBF) || // 扩展 A
-            (r >= 0x20000 && r <= 0x2A6DF) || // 扩展 B
-            (r >= 0xF900 && r <= 0xFAFF) || // 兼容汉字
-            (r >= 0xFF00 && r <= 0xFFEF) { // 全角标点/数字/字母
-            width += 2
-        } else {
-            width += 1
-        }
-    }
-    return width
+	width := 0
+	for _, r := range s {
+		// 判断是否为宽字符（常见中文、全角字符）
+		if (r >= 0x4E00 && r <= 0x9FFF) || // 基本汉字
+			(r >= 0x3400 && r <= 0x4DBF) || // 扩展 A
+			(r >= 0x20000 && r <= 0x2A6DF) || // 扩展 B
+			(r >= 0xF900 && r <= 0xFAFF) || // 兼容汉字
+			(r >= 0xFF00 && r <= 0xFFEF) { // 全角标点/数字/字母
+			width += 2
+		} else {
+			width += 1
+		}
+	}
+	return width
 }
 
 func doList(folderID string) error {
-    files, folders, err := listFilesPage(folderID, 1)
-    if err != nil {
-        return err
-    }
+	files, folders, err := listFilesPage(folderID, 1)
+	if err != nil {
+		return err
+	}
 
-    // 构建一个结构体保存每条记录
-    type Item struct {
-        Name string
-        Info string
-    }
-    var items []Item
+	// 构建一个结构体保存每条记录
+	type Item struct {
+		Name string
+		Info string
+	}
+	var items []Item
 
-    for _, f := range folders {
-        items = append(items, Item{Name: f.Name, Info: "[DIR]"})
-    }
-    for _, f := range files {
-        items = append(items, Item{Name: f.Name, Info: formatSize(f.Size)})
-    }
+	for _, f := range folders {
+		items = append(items, Item{Name: f.Name, Info: "[DIR]"})
+	}
+	for _, f := range files {
+		items = append(items, Item{Name: f.Name, Info: formatSize(f.Size)})
+	}
 
-    // 计算最大显示宽度
-    maxNameWidth := 0
-    for _, it := range items {
-        w := displayWidth(it.Name)
-        if w > maxNameWidth {
-            maxNameWidth = w
-        }
-    }
+	// 计算最大显示宽度
+	maxNameWidth := 0
+	for _, it := range items {
+		w := displayWidth(it.Name)
+		if w > maxNameWidth {
+			maxNameWidth = w
+		}
+	}
 
-    // 对齐打印
-    for _, it := range items {
-        nameWidth := displayWidth(it.Name)
-        padding := maxNameWidth - nameWidth
-        fmt.Printf("%s%s %s\n", it.Name, strings.Repeat(" ", padding), it.Info)
-    }
-    return nil
+	// 对齐打印
+	for _, it := range items {
+		nameWidth := displayWidth(it.Name)
+		padding := maxNameWidth - nameWidth
+		fmt.Printf("%s%s %s\n", it.Name, strings.Repeat(" ", padding), it.Info)
+	}
+	return nil
 }
 
 func listFilesPage(folderID string, page int) (files, folders []cloudFile, err error) {
