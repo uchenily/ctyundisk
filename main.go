@@ -17,7 +17,8 @@ func usage() {
 
 路径格式为 Unix 风格，如 /同步盘/yd , /我的文档
 配置文件可选 workDir 作为默认目录，此时相对路径会基于该目录解析
-根目录用 / 表示`)
+根目录用 / 表示
+可通过环境变量 YD_CONFIG_PATH 指定配置文件路径`)
 }
 
 func isHelpArg(s string) bool {

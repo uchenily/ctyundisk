@@ -10,6 +10,10 @@ cd ctyundisk
 make
 ```
 
+## 配置文件
+
+默认使用 `~/.yd.conf`，也可通过 `YD_CONFIG_PATH` 指定其它路径。
+
 ## 用法
 
 ```bash

@@ -8,7 +8,13 @@ import (
 	"strings"
 )
 
+const configPathEnv = "YD_CONFIG_PATH"
+
 func configPath() (string, error) {
+	if path := os.Getenv(configPathEnv); path != "" {
+		return path, nil
+	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Println("获取家目录失败:", err)
