@@ -127,6 +127,7 @@ func doUpload(localPath, parentID string) error {
 		}
 
 		_, _ = f.Seek(0, 0)
+		progress := &uploadProgress{total: fileSize}
 		for i := 0; i < sliceNum; i++ {
 			num := strconv.Itoa(i + 1)
 			partInfo := urlResp.Data["partNumber_"+num]
@@ -140,8 +141,13 @@ func doUpload(localPath, parentID string) error {
 				size = fileSize - offset
 			}
 			section := io.NewSectionReader(f, offset, size)
+			progress.part = i + 1
+			progress.partTotal = sliceNum
+			progress.partSize = size
+			progress.partOffset = offset
+			progress.partUploaded = 0
 
-			putReq, err := http.NewRequest("PUT", partInfo.RequestURL, section)
+			putReq, err := http.NewRequest("PUT", partInfo.RequestURL, progress.wrap(section))
 			if err != nil {
 				return err
 			}
@@ -151,7 +157,6 @@ func doUpload(localPath, parentID string) error {
 				}
 			}
 
-			fmt.Printf("\r上传分片 %d/%d...", i+1, sliceNum)
 			putResp, err := http.DefaultClient.Do(putReq)
 			if err != nil {
 				return fmt.Errorf("上传分片 %d 失败: %w", i+1, err)
@@ -160,8 +165,9 @@ func doUpload(localPath, parentID string) error {
 			if putResp.StatusCode != 200 {
 				return fmt.Errorf("上传分片 %d HTTP %d", i+1, putResp.StatusCode)
 			}
+			progress.finishPart()
 		}
-		fmt.Println()
+		progress.done()
 	} else {
 		fmt.Println("秒传成功！")
 	}
@@ -291,4 +297,84 @@ func formatDownloadCommand(downloadURL, localName string) string {
 
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+type uploadProgress struct {
+	total        int64
+	uploaded     int64
+	part         int
+	partTotal    int
+	partSize     int64
+	partOffset   int64
+	partUploaded int64
+	lastPercent  int
+}
+
+func (p *uploadProgress) wrap(r io.Reader) io.Reader {
+	return &progressReader{r: r, p: p}
+}
+
+func (p *uploadProgress) add(n int) {
+	if n <= 0 {
+		return
+	}
+	p.uploaded += int64(n)
+	p.partUploaded += int64(n)
+	percent := 0
+	if p.total > 0 {
+		percent = int(p.uploaded * 100 / p.total)
+	}
+	if percent != p.lastPercent || p.uploaded == p.total {
+		p.lastPercent = percent
+		p.render()
+	}
+}
+
+func (p *uploadProgress) render() {
+	width := 24
+	filled := 0
+	if p.total > 0 {
+		filled = int(p.uploaded * int64(width) / p.total)
+	}
+	if filled > width {
+		filled = width
+	}
+	bar := strings.Repeat("=", filled)
+	if filled < width {
+		bar += ">"
+		bar += strings.Repeat(" ", width-filled-1)
+	}
+	if p.uploaded >= p.total && p.total > 0 {
+		bar = strings.Repeat("=", width)
+	}
+	fmt.Printf("\r[%s] %3d%% %d/%d 字节", bar, p.lastPercent, p.uploaded, p.total)
+}
+
+func (p *uploadProgress) finishPart() {
+	p.partUploaded = p.partSize
+	p.render()
+	fmt.Printf("  分片 %d/%d 完成", p.part, p.partTotal)
+	if p.uploaded < p.total {
+		fmt.Print("\n")
+	}
+}
+
+func (p *uploadProgress) done() {
+	if p.total > 0 {
+		p.uploaded = p.total
+		p.lastPercent = 100
+	}
+	p.render()
+	fmt.Println("  上传完成")
+}
+
+type progressReader struct {
+	r io.Reader
+	p *uploadProgress
+}
+
+func (pr *progressReader) Read(buf []byte) (int, error) {
+	n, err := pr.r.Read(buf)
+	pr.p.add(n)
+	return n, err
 }
