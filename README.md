@@ -53,8 +53,8 @@ yd ls
 yd upload doc.pdf
 yd download 资料/video.mp4
 
-# 用 curl 下载
-yd url video.mp4 | xargs curl -o video.mp4 -L
+# 直接下载
+yd url video.mp4
 
 # 断点续传下载
 yd download video.mp4
@@ -63,6 +63,7 @@ yd download video.mp4
 ## 特性
 
 - 二维码扫码即可登录生成配置
+- 新生成的配置默认写入 `workDir=/同步盘`
 - 大文件自动分片上传（10MB/片）
 - 秒传检测，已存在的文件免上传
 - 断点续传下载
