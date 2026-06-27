@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
 
 func cmdUpload(args []string) {
@@ -127,7 +128,7 @@ func doUpload(localPath, parentID string) error {
 		}
 
 		_, _ = f.Seek(0, 0)
-		progress := &uploadProgress{total: fileSize}
+		progress := &uploadProgress{total: fileSize, startedAt: time.Now()}
 		for i := 0; i < sliceNum; i++ {
 			num := strconv.Itoa(i + 1)
 			partInfo := urlResp.Data["partNumber_"+num]
@@ -308,6 +309,7 @@ type uploadProgress struct {
 	partOffset   int64
 	partUploaded int64
 	lastPercent  int
+	startedAt    time.Time
 }
 
 func (p *uploadProgress) wrap(r io.Reader) io.Reader {
@@ -347,7 +349,8 @@ func (p *uploadProgress) render() {
 	if p.uploaded >= p.total && p.total > 0 {
 		bar = strings.Repeat("=", width)
 	}
-	fmt.Printf("\r[%s] %3d%% %d/%d 字节", bar, p.lastPercent, p.uploaded, p.total)
+	speed := p.speed()
+	fmt.Printf("\r[%s] %3d%% %d/%d 字节 %s/s", bar, p.lastPercent, p.uploaded, p.total, speed)
 }
 
 func (p *uploadProgress) finishPart() {
@@ -366,6 +369,29 @@ func (p *uploadProgress) done() {
 	}
 	p.render()
 	fmt.Println("  上传完成")
+}
+
+func (p *uploadProgress) speed() string {
+	elapsed := time.Since(p.startedAt)
+	if elapsed <= 0 {
+		return "0B"
+	}
+	bps := float64(p.uploaded) / elapsed.Seconds()
+	return formatBytes(bps)
+}
+
+func formatBytes(v float64) string {
+	units := []string{"B", "KB", "MB", "GB", "TB", "PB"}
+	if v < 1024 {
+		return fmt.Sprintf("%.0fB", v)
+	}
+	unit := 1024.0
+	exp := 0
+	for v >= unit && exp < len(units)-1 {
+		v /= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f%s", v, units[exp])
 }
 
 type progressReader struct {
