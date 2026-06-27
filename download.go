@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
 func cmdDownload(args []string) {
@@ -62,6 +63,13 @@ func downloadFile(downloadURL, localName string, totalSize int64) error {
 	}
 	defer file.Close()
 
+	progress := newProgressBar("下载", totalSize)
+	progress.uploaded = offset
+	if offset > 0 {
+		progress.lastRender = time.Now()
+		progress.render(false)
+	}
+
 	req, err := http.NewRequest("GET", downloadURL, nil)
 	if err != nil {
 		return err
@@ -82,10 +90,11 @@ func downloadFile(downloadURL, localName string, totalSize int64) error {
 		return fmt.Errorf("下载失败 HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
-	written, err := io.Copy(file, resp.Body)
+	_, err = io.Copy(file, progress.reader(resp.Body))
 	if err != nil {
 		return err
 	}
-	fmt.Printf("下载完成: %s (%d 字节)\n", localName, offset+written)
+	progress.finish()
+	fmt.Printf("下载完成: %s\n", localName)
 	return nil
 }
