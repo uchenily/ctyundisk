@@ -105,6 +105,15 @@ func apiGet(path string, params url.Values) (*http.Request, error) {
 	return req, nil
 }
 
+func apiPost(path string, params url.Values) (*http.Request, error) {
+	req, err := http.NewRequest("POST", APIBase+path, strings.NewReader(params.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	return req, nil
+}
+
 func doAPI(req *http.Request, result any) error {
 	signRequest(req)
 

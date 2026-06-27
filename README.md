@@ -36,6 +36,9 @@ yd download <文件路径>
 
 # 仅输出下载链接
 yd url <文件路径>
+
+# 删除文件或目录
+yd remove <文件路径...>
 ```
 
 ### 示例
@@ -62,6 +65,9 @@ yd url video.mp4
 
 # 断点续传下载
 yd download video.mp4
+
+# 删除
+yd remove 旧文件.txt /同步盘/旧目录
 ```
 
 ## 特性
@@ -71,6 +77,7 @@ yd download video.mp4
 - 大文件自动分片上传（10MB/片）
 - 秒传检测，已存在的文件免上传
 - 断点续传下载
+- 支持批量删除文件或目录
 
 ## 参考项目
 

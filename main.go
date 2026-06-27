@@ -14,6 +14,7 @@ func usage() {
   yd download <文件路径>             下载文件到当前目录
   yd url <文件路径>                  输出直接下载命令
   yd ls [路径]                       列出云盘目录内容
+  yd remove <文件路径...>            删除文件或目录
 
 路径格式为 Unix 风格，如 /同步盘/yd , /我的文档
 配置文件可选 workDir 作为默认目录，此时相对路径会基于该目录解析
@@ -62,6 +63,8 @@ func main() {
 		cmdURL(os.Args[2:])
 	case "ls":
 		cmdList(os.Args[2:])
+	case "remove":
+		cmdRemove(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "未知命令: %s\n", cmd)
 		os.Exit(1)
