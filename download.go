@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"time"
 )
 
 func cmdDownload(args []string) {
@@ -66,7 +65,6 @@ func downloadFile(downloadURL, localName string, totalSize int64) error {
 	progress := newProgressBar("下载", totalSize)
 	progress.uploaded = offset
 	if offset > 0 {
-		progress.lastRender = time.Now()
 		progress.render(false)
 	}
 

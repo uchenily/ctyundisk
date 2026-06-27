@@ -11,6 +11,7 @@ type progressBar struct {
 	label       string
 	total       int64
 	startedAt   time.Time
+	finishedAt  time.Time
 	uploaded    int64
 	lastPercent int
 	lastRender  time.Time
@@ -39,6 +40,9 @@ func (p *progressBar) add(n int) {
 		percent = int(p.uploaded * 100 / p.total)
 	}
 	now := time.Now()
+	if p.uploaded >= p.total && p.total > 0 && p.finishedAt.IsZero() {
+		p.finishedAt = now
+	}
 	if percent != p.lastPercent || now.Sub(p.lastRender) >= 150*time.Millisecond || p.uploaded >= p.total {
 		p.lastPercent = percent
 		p.lastRender = now
@@ -50,6 +54,9 @@ func (p *progressBar) finish() {
 	if p.total > 0 {
 		p.uploaded = p.total
 		p.lastPercent = 100
+	}
+	if p.finishedAt.IsZero() {
+		p.finishedAt = time.Now()
 	}
 	p.render(true)
 	fmt.Println()
@@ -75,15 +82,19 @@ func (p *progressBar) render(done bool) {
 	}
 
 	speed := p.speed()
-	fmt.Printf("\r%s [%s] %3d%% %s/%s %s/s", p.label, bar, p.lastPercent, formatBytes(float64(p.uploaded)), formatBytes(float64(p.total)), speed)
+	fmt.Printf("\r\033[2K%s [%s] %3d%% %s/%s %s", p.label, bar, p.lastPercent, formatBytes(float64(p.uploaded)), formatBytes(float64(p.total)), speed)
 }
 
 func (p *progressBar) speed() string {
-	elapsed := time.Since(p.startedAt).Seconds()
-	if elapsed <= 0 {
-		return "0B"
+	end := time.Now()
+	if !p.finishedAt.IsZero() {
+		end = p.finishedAt
 	}
-	return formatBytes(float64(p.uploaded) / elapsed)
+	elapsed := end.Sub(p.startedAt).Seconds()
+	if elapsed <= 0 {
+		return "0B/s"
+	}
+	return formatBytes(float64(p.uploaded)/elapsed) + "/s"
 }
 
 func formatBytes(v float64) string {

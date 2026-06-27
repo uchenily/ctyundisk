@@ -143,10 +143,9 @@ func buildUploadRequest(path string, params url.Values) (*http.Request, error) {
 }
 
 func doUploadAPI(req *http.Request, result any) error {
-	client := &http.Client{Timeout: 0}
 	signRequest(req)
 
-	resp, err := client.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
 	}
