@@ -97,3 +97,7 @@ yd remove 旧文件.txt /同步盘/旧目录
 ## 参考项目
 
 - https://github.com/gowsp/cloud189
+
+## 社区&交流
+
+欢迎到 [LINUX DO](https://linux.do/) 社区分享交流。
