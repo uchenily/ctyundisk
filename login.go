@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"image"
 	"image/color"
 	_ "image/gif"
@@ -234,16 +235,37 @@ func printQRCode(client *http.Client, qrURL string) error {
 	}
 
 	bounds := img.Bounds()
-	qrWidth := bounds.Dx()
+	qrW := bounds.Dx()
+	qrH := bounds.Dy()
 	termRows, termCols := terminalSize()
-	maxModules := max(1, (termRows*3)/4)
-	if termCols > 0 {
-		maxModules = min(maxModules, termCols/2)
+
+	// Each text column = 1 QR pixel wide.
+	// Each text row = 2 QR pixels tall (using upper/lower half-block chars ▀▄█).
+	// Terminal chars are ~2:1 height:width, so this keeps the QR square.
+	//
+	// Target width: at 80 cols use 90% (72), at 210 cols use ~43% (90).
+	// Formula: target = 12 * cols^0.37, calibrated to these two points.
+	// This gives a decreasing proportion as terminal grows, keeping the QR
+	// large enough to scan but not wastefully big.
+	targetCols := int(12.0 * math.Pow(float64(termCols), 0.37))
+	if targetCols < 1 {
+		targetCols = 1
 	}
+	// Never exceed 90% of terminal width
+	if targetCols > (termCols*9)/10 {
+		targetCols = (termCols * 9) / 10
+	}
+
 	scale := 1
-	if qrWidth > maxModules {
-		scale = (qrWidth + maxModules - 1) / maxModules
+	if qrW > targetCols {
+		scale = (qrW + targetCols - 1) / targetCols
 	}
+
+	renderCols := (qrW + scale - 1) / scale
+	renderRows := (qrH + scale*2 - 1) / (scale * 2)
+
+	fmt.Fprintf(os.Stderr, "终端: %dx%d  二维码图片: %dx%d  targetCols=%d  scale=%d  渲染列x行=%dx%d\n",
+		termCols, termRows, qrW, qrH, targetCols, scale, renderCols, renderRows)
 
 	for y := bounds.Min.Y; y < bounds.Max.Y; y += 2 * scale {
 		var line strings.Builder
@@ -254,16 +276,15 @@ func printQRCode(client *http.Client, qrURL string) error {
 			if bottomY < bounds.Max.Y {
 				bottomDark = isDark(img.At(x, bottomY))
 			}
-
 			switch {
 			case topDark && bottomDark:
-				line.WriteString("██")
+				line.WriteString("█")
 			case topDark:
-				line.WriteString("▀▀")
+				line.WriteString("▀")
 			case bottomDark:
-				line.WriteString("▄▄")
+				line.WriteString("▄")
 			default:
-				line.WriteString("  ")
+				line.WriteString(" ")
 			}
 		}
 		fmt.Println(line.String())
